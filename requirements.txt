@@ -1,10 +1,9 @@
 # Web Framework
 fastapi==0.110.0
 uvicorn[standard]==0.27.1
-
-# Environment Variables
+Flask==3.0.2
+Flask-Cors==4.0.0
 python-dotenv==1.0.1
-pydantic-settings==2.2.1
 
 # Database
 supabase==2.3.4
@@ -14,9 +13,15 @@ psycopg[binary]==3.1.18
 requests==2.31.0
 pandas==2.2.1
 numpy==1.26.4
+sodapy==2.2.0
 
 # AI/ML
 google-generativeai==0.3.2
+nltk==3.9.1
+scikit-learn==1.6.1
+joblib==1.4.2
+matplotlib==3.8.3
+gradio==5.32.1
 
 # Testing
 pytest==8.0.2
@@ -26,5 +31,6 @@ pytest-cov==4.1.0
 black==24.2.0
 flake8==7.0.0
 isort==5.13.2
+faker==37.3.0
 
-# Note: Additional dependencies like smolagents, scikit-learn, joblib will be added in later phases 
+# Note: Additional dependencies like smolagents will be added in later phases 
