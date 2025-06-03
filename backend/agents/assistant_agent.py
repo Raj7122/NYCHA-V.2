@@ -2,7 +2,7 @@
 
 import os
 import sys
-import openai
+import google.generativeai as genai
 
 # Add the project root directory to the Python path
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -10,33 +10,18 @@ sys.path.insert(0, project_root)
 
 import json
 from typing import List, Dict, Any, Optional
-from smolagents import CodeAgent, OpenAIServerModel, ToolCollection # Make sure OpenAIServerModel is the correct import for Gemini via OpenAI endpoint
-
-from backend.config.settings import settings # To get GEMINI_API_KEY etc.
+from smolagents import CodeAgent, OpenAIServerModel, ToolCollection, ChatMessage
+from backend.config.settings import settings
 
 # --- LLM Configuration for Gemini ---
-# Ensure your GEMINI_API_KEY is set in your .env file and loaded by settings.py
-# You'll need the specific base_url for Google's OpenAI-compatible endpoint for Gemini.
-# This URL might be something like "https://generativelanguage.googleapis.com/v1beta" 
-# or a specific one provided by Google for its OpenAI-compatible API.
-# The model name would be like "models/gemini-1.0-pro" or "models/gemini-1.5-flash-latest".
+GEMINI_API_KEY = settings.GEMINI_API_KEY
+GEMINI_MODEL_NAME = "gemini-2.0-flash"  # Using the correct model identifier
 
-# Replace these with your actual Gemini API key and base URL
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "your-api-key-here")
-GEMINI_BASE_URL = os.getenv("GEMINI_OPENAI_COMPATIBLE_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/models")
-GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash")
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY is not set in environment variables")
 
-if GEMINI_BASE_URL == "YOUR_GEMINI_COMPATIBLE_BASE_URL_HERE" or GEMINI_MODEL_NAME == "YOUR_GEMINI_MODEL_NAME_FOR_OPENAI_API_HERE":
-    print("WARNING: GEMINI_BASE_URL or GEMINI_MODEL_NAME is using placeholder values. Update them for actual Gemini API calls.")
-    # For now, to prevent crashes if these are not set, we might mock or skip LLM init.
-    # However, the agent fundamentally needs an LLM.
-    # For now, we will proceed, but actual LLM calls will fail if these are not correct.
-
-# The OpenAI-compatible endpoint for Google Gemini
-GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
-
-# The model ID for Gemini (e.g., "gemini-2.0-flash")
-GEMINI_MODEL_ID = "gemini-2.0-flash"
+# Configure the Gemini API
+genai.configure(api_key=GEMINI_API_KEY)
 
 # --- MCP Tool Collection Setup ---
 # This is how we connect to the MCP server for tool access
@@ -96,51 +81,59 @@ When asked for a "daily briefing" or "initial briefing":
 6. Format the entire briefing as a list of briefing elements.
 """
 
-openai.api_key = GEMINI_API_KEY
-openai.api_base = GEMINI_BASE_URL
-
-class CustomOpenAIServerModel(OpenAIServerModel):
-    def __init__(self, api_key, base_url, model_id, **kwargs):
+class CustomGeminiModel(OpenAIServerModel):
+    def __init__(self, api_key, model_id, **kwargs):
         self.api_key = api_key
-        self.base_url = base_url
         self.model_id = model_id
-        self.kwargs = kwargs
-        self.client = None
+        self.kwargs = {k: v for k, v in kwargs.items() 
+                      if k not in ['additional_args'] 
+                      and k in ["temperature", "max_tokens"]}
+        self.model = None
 
-    def create_client(self):
-        if self.client is None:
-            self.client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
-        return self.client
+    def create_model(self):
+        if self.model is None:
+            self.model = genai.GenerativeModel(self.model_id)
+        return self.model
 
-    def generate(self, input_messages, **additional_args):
-        # Remove the problematic 'additional_args' key if present
-        if 'additional_args' in additional_args:
-            additional_args = {k: v for k, v in additional_args.items() if k != 'additional_args'}
-        client = self.create_client()
-        completion_kwargs = {
-            "model": self.model_id,
-            "messages": input_messages,
-            **self.kwargs
-        }
-        # Only allow valid OpenAI params
-        valid_args = {k: v for k, v in additional_args.items() if k in ["temperature", "max_tokens"]}
-        completion_kwargs.update(valid_args)
-        response = client.chat.completions.create(**completion_kwargs)
-        return response.choices[0].message.content
+    def generate(self, input_messages, **kwargs):
+        # Remove additional_args from kwargs if present
+        kwargs.pop('additional_args', None)
+        
+        model = self.create_model()
+        
+        # Convert OpenAI-style messages to Gemini format
+        prompt = ""
+        for msg in input_messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "system":
+                prompt += f"System: {content}\n"
+            elif role == "user":
+                prompt += f"User: {content}\n"
+            elif role == "assistant":
+                prompt += f"Assistant: {content}\n"
+        
+        # Generate response
+        response = model.generate_content(prompt)
+        
+        # Format the response as a JSON string containing a list of briefing elements
+        response_text = response.text
+        json_response = json.dumps([{
+            "type": "text",
+            "content": response_text
+        }])
+        
+        # Return a ChatMessage object that smolagents expects
+        return ChatMessage(role="assistant", content=json_response)
 
 class AssistantAgent(CodeAgent):
     def __init__(self, tools_mcp_uri: Optional[str] = None):
         # Initialize the LLM with Gemini configuration
-        llm = CustomOpenAIServerModel(
+        llm = CustomGeminiModel(
             api_key=GEMINI_API_KEY,
-            base_url=GEMINI_BASE_URL,
             model_id=GEMINI_MODEL_NAME,
             temperature=0.7,
-            max_tokens=4096,
-            additional_args={
-                "api_version": "v1beta",
-                "api_type": "openai"
-            }
+            max_tokens=4096
         )
         
         # Initialize the base CodeAgent with our LLM
@@ -166,31 +159,20 @@ class AssistantAgent(CodeAgent):
         # The output of self.run() is typically the final answer from the LLM.
         
         # Ensure tools are connected if an MCP URI was provided.
-        # This might need to be done explicitly if not handled by CodeAgent's constructor.
-        # If not using an executor that handles this, self.tools needs to be populated.
-        if self.tools_mcp_uri and not self.tools: # self.tools is the ToolCollection
+        if self.tools_mcp_uri and not self.tools:
              print(f"Connecting to tools from URI: {self.tools_mcp_uri}")
              try:
-                 # This is a synchronous call; if run_turn is async, consider how ToolCollection handles async.
-                 # For stdio, it might involve subprocess management.
-                 # This line is a placeholder for how tools get connected; it might
-                 # need to be async or handled externally by an executor.
-                 # self.tools = ToolCollection.from_mcp(self.tools_mcp_uri)
-                 # For now, let's assume tools are connected externally or this is a simplified flow.
-                 # If self.tools is not set, CodeAgent will not use external tools.
                  print("Placeholder: Tool connection logic for MCP URI needs to be robustly implemented or handled by executor.")
-                 pass # Avoid crashing if URI is set but connection logic is placeholder
+                 pass
              except Exception as e:
                  print(f"Failed to connect to MCP tools: {e}")
-                 # Fallback to no tools or return error
                  return [{"type": "text", "content": f"Error: Could not connect to internal tools. {e}"}]
-
 
         # The actual call to the agent's core logic (ReAct loop)
         # CodeAgent.run() takes a prompt.
         # The output here is the raw string from the LLM, which we expect to be
         # a JSON string representing a list of briefing elements.
-        raw_llm_response_str = await super().run(user_input) # Use super().run for CodeAgent's ReAct loop
+        raw_llm_response_str = super().run(user_input)  # Remove await since run() is not async
         
         print(f"Raw LLM response string: {raw_llm_response_str}")
 
