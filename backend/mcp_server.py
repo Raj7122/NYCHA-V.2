@@ -1,5 +1,6 @@
 # backend/mcp_server.py
 
+from typing import List, Dict, Any, Optional
 import os
 import sys
 import gradio as gr # New import
@@ -25,61 +26,155 @@ mcp_application = FastMCP(
     version="0.1.0" # Optional
 )
 
-# Register the tool functions with the MCP application.
-# The @mcp_application.tool() decorator is used if you define tools in the same file.
-# If importing tools, you can register them programmatically, or fastmcp might
-# pick them up if they are structured correctly and imported, but explicit registration
-# using a method or by decorating them in their own file and then having the server
-# discover them via an import path is also common.
+# Register tools with MCP application
+print("=== DEBUG: MCP Server Tool Registration ===")
 
-# For FastMCP, if the tools are simple functions and already well-defined with docstrings
-# and type hints, importing them might be enough for some discovery mechanisms,
-# or we might need to explicitly add them if @tool decorator wasn't used in their definition file.
-
-# Let's assume FastMCP might not automatically discover imported functions without
-# further configuration or them being decorated in their own file with an MCP instance.
-# A common way with FastMCP is to re-expose them or ensure they are decorated.
-
-# Option 1: Re-expose/wrap them here with the decorator (if they weren't already decorated)
-# This ensures they are explicitly part of *this* MCP application.
-
+# Minimal test tool to check FastMCP registration
 @mcp_application.tool()
-def urgent_complaints(date_filter: str = None, limit: int = 10) -> list:
-    """
-    MCP wrapper for retrieving urgent 311 complaints.
-    Delegates to get_urgent_complaints_tool. Docstring here is what MCP sees.
-    (Alternatively, ensure the original functions have detailed enough docstrings
-    and FastMCP can pick them up directly, or use a different registration method
-    if available in FastMCP for pre-defined functions.)
+def ping() -> str:
+    """A simple ping tool for testing."""
+    return "pong"
+
+# Register tools using add_tool method
+@mcp_application.tool()
+def urgent_complaints(
+    date_filter: Optional[str] = None,
+    limit: int = 10
+) -> List[Dict[str, Any]]:
+    """Retrieves a list of urgent 311 complaints, optionally filtered by date.
+
+    This tool queries the 'complaints_311' table for records where 
+    'nlp_urgency_flag' is true.
 
     Args:
-        date_filter (str, optional): A string describing the date filter. 
-                                     Examples: "today", "past_7_days", "YYYY-MM-DD". 
-                                     Defaults to None (no date filter).
-        limit (int): The maximum number of urgent complaints to return. Defaults to 10.
+        date_filter (Optional[str]): A string describing the date filter. 
+            Examples: "today", "past_7_days", "YYYY-MM-DD". 
+            If None, no date filter is applied. Defaults to None.
+        limit (int): The maximum number of urgent complaints to return. 
+            Must be a positive integer. Defaults to 10.
 
     Returns:
-        list: A list of dictionaries representing urgent complaints.
+        List[Dict[str, Any]]: A list of dictionaries, where each dictionary
+            represents an urgent complaint with the following fields:
+            - unique_key (str): Unique identifier for the complaint
+            - created_date (str): ISO format date when complaint was created
+            - complaint_type (str): Type of complaint (e.g., "HEAT/HOT WATER")
+            - descriptor (str): Detailed description of the complaint
+            - incident_address (str): Address where complaint occurred
+            - borough (str): NYC borough where complaint occurred
+            - nlp_keywords (List[str]): Keywords that triggered urgency flag
+            - status (str): Current status of the complaint
+            Returns an empty list if no urgent complaints are found.
+
+    Raises:
+        ValueError: If limit is not a positive integer.
     """
-    # We directly call the imported and already well-documented function
+    if not isinstance(limit, int) or limit <= 0:
+        raise ValueError("limit must be a positive integer")
+    
     return get_urgent_complaints_tool(date_filter=date_filter, limit=limit)
 
 @mcp_application.tool()
-def ml_rework_risk_assessments(work_orders_input: list) -> list:
-    """
-    MCP wrapper for ML-predicted rework risk assessments.
-    Delegates to get_ml_rework_risk_assessments_tool.
+def ml_rework_risk_assessments(
+    work_orders: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Retrieves ML-predicted rework risk assessments for a list of work orders.
+
+    Each work order in the input list must be a dictionary containing all 
+    features required by the ML model.
 
     Args:
-        work_orders_input (list): A list of work order data dictionaries. 
-                                 Each dictionary must contain features required by the ML model.
+        work_orders (List[Dict[str, Any]]): A list of work order data.
+            Each dictionary must include:
+            - age_years (float): Age of the asset in years (0-100)
+            - avg_past_rework_rate (float): Contractor's average past rework rate (0-1)
+            - asset_type (str): Type of asset (e.g., "HVAC", "Plumbing", "Electrical")
+            - simulated_urgency_level (str): Urgency level ("Low", "Medium", "High")
+            - work_description_completed (str): Description of completed work
 
     Returns:
-        list: A list of dictionaries with original work order data plus predictions.
-    """
-    return get_ml_rework_risk_assessments_tool(work_orders_input=work_orders_input)
+        List[Dict[str, Any]]: A list of dictionaries, each containing:
+            - All original work order fields
+            - predicted_rework_label (int): 0 (no rework needed) or 1 (rework needed)
+            - predicted_rework_probability (float): Probability of rework needed (0-1)
+            - predicted_rework_needed_text (str): "Yes" or "No"
+            - predicted_rework_probability_percent (str): Formatted percentage
+            - top_contributing_factors (Dict[str, float]): Top 3 factors affecting prediction
+            Returns an empty list if an error occurs.
 
-# Add more wrapped tools here if needed
+    Raises:
+        ValueError: If work_orders is empty or contains invalid data.
+    """
+    if not work_orders:
+        raise ValueError("work_orders list cannot be empty")
+    
+    # Validate required fields and their types
+    required_fields = {
+        'age_years': (float, int),
+        'avg_past_rework_rate': (float, int),
+        'asset_type': str,
+        'simulated_urgency_level': str,
+        'work_description_completed': str
+    }
+    
+    valid_urgency_levels = {"Low", "Medium", "High"}
+    
+    for i, wo in enumerate(work_orders):
+        # Check for missing fields
+        missing_fields = [field for field in required_fields if field not in wo]
+        if missing_fields:
+            raise ValueError(f"Work order {i} is missing required fields: {missing_fields}")
+        
+        # Validate field types and ranges
+        if not isinstance(wo['age_years'], required_fields['age_years']) or not 0 <= wo['age_years'] <= 100:
+            raise ValueError(f"Work order {i}: age_years must be a number between 0 and 100")
+        
+        if not isinstance(wo['avg_past_rework_rate'], required_fields['avg_past_rework_rate']) or not 0 <= wo['avg_past_rework_rate'] <= 1:
+            raise ValueError(f"Work order {i}: avg_past_rework_rate must be a number between 0 and 1")
+        
+        if not isinstance(wo['asset_type'], required_fields['asset_type']):
+            raise ValueError(f"Work order {i}: asset_type must be a string")
+        
+        if not isinstance(wo['simulated_urgency_level'], required_fields['simulated_urgency_level']) or wo['simulated_urgency_level'] not in valid_urgency_levels:
+            raise ValueError(f"Work order {i}: simulated_urgency_level must be one of {valid_urgency_levels}")
+        
+        if not isinstance(wo['work_description_completed'], required_fields['work_description_completed']):
+            raise ValueError(f"Work order {i}: work_description_completed must be a string")
+    
+    return get_ml_rework_risk_assessments_tool(work_orders_input=work_orders)
+
+print("=== End of Tool Registration Debug ===")
+
+# DEBUG: Check tools registered with FastMCP instance
+print("\n=== DEBUG: MCP Server Tool Registration ===")
+print("All attributes of mcp_application:", dir(mcp_application))
+if hasattr(mcp_application, 'tools'):
+    print(f"DEBUG MCP SERVER: Tools directly registered in mcp_application (FastMCP):")
+    if mcp_application.tools:
+        for tool_name, tool_obj in mcp_application.tools.items():
+            print(f"  - Name: {tool_name}, Type: {type(tool_obj)}")
+            if hasattr(tool_obj, 'description'):
+                print(f"    Description: {tool_obj.description}")
+            if hasattr(tool_obj, '__doc__'):
+                print(f"    Docstring: {tool_obj.__doc__}")
+    else:
+        print("  No tools found in mcp_application.tools dictionary")
+else:
+    print("DEBUG MCP SERVER: mcp_application has no 'tools' attribute")
+
+# Check for other potential tool storage locations
+print("\nChecking alternative tool storage locations:")
+if hasattr(mcp_application, '_tools'):
+    print("Found _tools attribute:")
+    print(f"  Type: {type(mcp_application._tools)}")
+    print(f"  Content: {mcp_application._tools}")
+
+if hasattr(mcp_application, 'get_tools_list'):
+    print("\nFound get_tools_list method:")
+    tools_list = mcp_application.get_tools_list()
+    print(f"  Returned {len(tools_list) if tools_list else 0} tools")
+
+print("\n=== End of Tool Registration Debug ===\n")
 
 # --- Main execution block to run the MCP server via Gradio HTTP ---
 if __name__ == "__main__":
@@ -94,18 +189,37 @@ if __name__ == "__main__":
 
     # Launch the Gradio app, passing our FastMCP application instance to mcp_server.
     # This will make the MCP tools available over HTTP+SSE.
-    # Gradio will print the URL where it's running (e.g., http://127.0.0.1:7860)
-    # The MCP endpoint will typically be at <base_url>/gradio_api/mcp/sse
     print("Starting MCP server with Gradio...")
     try:
-        # server_name="0.0.0.0" makes it accessible on your network, not just localhost.
-        # server_port can be specified if 7860 is taken.
-        demo.launch(
-            mcp_server=mcp_application, 
-            server_name="0.0.0.0", # Listen on all interfaces
-            server_port=7861 # Using a different port, e.g., 7861, to avoid conflict if 7860 is used
-        ) 
+        # Try to find an available port starting from 7863
+        base_port = 7863
+        max_port_attempts = 10
+        port = base_port
+        
+        for attempt in range(max_port_attempts):
+            try:
+                # Ensure tools are properly exposed through Gradio
+                demo.launch(
+                    mcp_server=mcp_application,  # Use the FastMCP instance with registered tools
+                    server_name="0.0.0.0",  # Listen on all interfaces
+                    server_port=port,
+                    share=False,  # Don't create a public URL
+                    quiet=True  # Reduce console output
+                )
+                print(f"Successfully started MCP server on port {port}")
+                print(f"🔨 MCP server (using SSE) running at: http://localhost:{port}/gradio_api/mcp/sse")
+                break
+            except Exception as e:
+                if "address already in use" in str(e):
+                    print(f"Port {port} is in use, trying next port...")
+                    port += 1
+                else:
+                    raise
+        else:
+            raise Exception(f"Could not find an available port after {max_port_attempts} attempts")
+            
     except KeyboardInterrupt:
         print("\nShutting down Gradio MCP server.")
     except Exception as e:
-        print(f"An error occurred while launching or running the Gradio MCP server: {e}") 
+        print(f"An error occurred while launching or running the Gradio MCP server: {e}")
+        raise 
